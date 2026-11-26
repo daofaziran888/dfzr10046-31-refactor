@@ -56,6 +56,7 @@
               class="link"
               type="button"
               :data-testid="`action-${row.id}-${action}`"
+              :data-request-id="state.actionRequestIds[`${meta.key}:${row.id}:${action}`] ?? ''"
               @click="runAction(action, row)"
             >
               {{ action }}
@@ -94,98 +95,76 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, toRef, watch } from 'vue'
 
-import {
-  createEntry,
-  downloadEntries,
-  listEntries,
-  moduleMeta,
-  runAction as applyAction,
-} from '@/api/backend-service'
+import { moduleMeta } from '@/api/backend-service'
+import { useWorkbench } from '@/domain/workbench-controller'
 import type { EntryRow } from '@/data/types'
 
 const props = defineProps<{ moduleKey: string }>()
-const meta = moduleMeta(props.moduleKey)
-const rows = ref<EntryRow[]>([])
-const total = ref(0)
-const errorMessage = ref('')
-const filters = ref<Record<string, string>>({})
-const filterFields = meta.fields.slice(0, 3)
-const showCreate = ref(false)
-const creating = ref(false)
-const createValues = ref<Record<string, string>>({})
+const moduleKey = toRef(props, 'moduleKey')
+const workbench = useWorkbench(moduleKey)
+const state = workbench.state
+
+const meta = computed(() => moduleMeta(props.moduleKey))
+const rows = computed(() => state.value.rows)
+const total = computed(() => state.value.total)
+const errorMessage = computed(() => state.value.errorMessage)
+const filters = computed(() => state.value.filters)
+const filterFields = computed(() => meta.value.fields.slice(0, 3))
+const showCreate = computed({
+  get: () => state.value.showCreate,
+  set: (value: boolean) => {
+    state.value.showCreate = value
+  },
+})
+const creating = computed(() => state.value.creating)
+const createValues = computed(() => state.value.createValues)
 const stats = computed(() => [
-  { label: meta.metrics[0], value: total.value },
-  { label: meta.metrics[1], value: rows.value.filter((row) => row.status === meta.statuses[1]).length },
+  { label: meta.value.metrics[0], value: total.value },
+  { label: meta.value.metrics[1], value: rows.value.filter((row) => row.status === meta.value.statuses[1]).length },
   {
-    label: meta.metrics[2],
-    value: rows.value.filter((row) => row.status === meta.statuses[meta.statuses.length - 1]).length,
+    label: meta.value.metrics[2],
+    value: rows.value.filter((row) => row.status === meta.value.statuses[meta.value.statuses.length - 1]).length,
   },
 ])
 const statusSummary = computed(() =>
-  meta.statuses.map((status) => ({
+  meta.value.statuses.map((status) => ({
     status,
     count: rows.value.filter((row) => String(row.status) === status).length,
   })),
 )
 
 function resetFilters() {
-  filters.value = {}
-  void reload()
+  workbench.resetFilters()
 }
 
-async function exportRows() {
-  errorMessage.value = ''
-  try {
-    await downloadEntries(meta.key, filters.value)
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '导出失败'
-  }
+function exportRows() {
+  return workbench.exportRows()
 }
 
 function openCreate() {
-  createValues.value = Object.fromEntries(meta.fields.map((field) => [field, '']))
-  errorMessage.value = ''
-  showCreate.value = true
+  workbench.openCreate()
 }
 
-async function submitCreate() {
-  creating.value = true
-  errorMessage.value = ''
-  try {
-    const result = await createEntry(meta.key, createValues.value)
-    if (!result.ok) throw new Error(result.message)
-    showCreate.value = false
-    await reload()
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '登记失败'
-  } finally {
-    creating.value = false
-  }
+function submitCreate() {
+  return workbench.submitCreate()
 }
 
-async function runAction(action: string, row: EntryRow) {
-  errorMessage.value = ''
-  try {
-    const result = await applyAction(meta.key, Number(row.id), action)
-    if (!result.ok) throw new Error(result.message)
-    await reload()
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '操作失败'
-  }
+function runAction(action: string, row: EntryRow) {
+  return workbench.runAction(action, row)
 }
 
-async function reload() {
-  errorMessage.value = ''
-  try {
-    const payload = await listEntries(meta.key, filters.value)
-    rows.value = payload.items
-    total.value = payload.total
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '业务列表读取失败'
-  }
+function reload() {
+  return workbench.reload()
 }
 
-onMounted(reload)
+onMounted(() => {
+  void reload()
+})
+
+// 即使外部没有用 route key 强制重挂载，直接切换 moduleKey 时也不能继续显示旧模块。
+watch(moduleKey, () => {
+  void reload()
+})
 </script>

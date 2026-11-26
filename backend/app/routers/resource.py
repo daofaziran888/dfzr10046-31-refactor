@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
 from app.services import service_for
+from app.services.workbench_boundary import workbench_boundary
 
 router = APIRouter(prefix="/api", tags=["业务资源"])
 
@@ -31,14 +32,28 @@ def list_entries(
     size: int = Query(default=20, ge=1, le=200),
 ) -> PageResult[dict]:
     service = require_service(module)
-    filters = {
-        key: value.strip()
-        for key, value in request.query_params.items()
-        if key in service.LIST_FIELDS and value.strip()
-    }
-    items, total = service.list_entries(
-        filters=filters, keyword=keyword, status=status, page=page, size=size)
-    return PageResult(items=items, total=total, page=page, size=size)
+    filters = workbench_boundary.collect_filters(service, request.query_params)
+    payload = workbench_boundary.query(
+        service,
+        filters=filters,
+        keyword=keyword,
+        status=status,
+        page=page,
+        size=size,
+    )
+    return PageResult(**payload)
+
+
+@router.get("/receipts/{receipt_key}", response_model=ActionResult)
+def get_action_receipt(receipt_key: str) -> ActionResult:
+    receipt = workbench_boundary.get_receipt(receipt_key)
+    if receipt is None:
+        raise HTTPException(status_code=404, detail=f"动作回执 {receipt_key} 不存在或已过期")
+    return ActionResult(
+        ok=bool(receipt["ok"]),
+        message=str(receipt["message"]),
+        entry=receipt.get("entry"),
+    )
 
 
 @router.get("/{module}/export")
@@ -49,13 +64,16 @@ def export_entries(
     status: str | None = Query(default=None),
 ) -> StreamingResponse:
     service = require_service(module)
-    filters = {
-        key: value.strip()
-        for key, value in request.query_params.items()
-        if key in service.LIST_FIELDS and value.strip()
-    }
-    items, _ = service.list_entries(
-        filters=filters, keyword=keyword, status=status, page=1, size=1_000_000)
+    filters = workbench_boundary.collect_filters(service, request.query_params)
+    payload = workbench_boundary.query(
+        service,
+        filters=filters,
+        keyword=keyword,
+        status=status,
+        page=1,
+        size=1_000_000,
+    )
+    items = payload["items"]
     output = io.StringIO()
     output.write("\ufeff")
     writer = csv.writer(output, lineterminator="\n")
@@ -85,14 +103,31 @@ def get_entry(module: str, entry_id: int) -> dict[str, Any]:
 @router.post("/{module}", response_model=ActionResult)
 def create_entry(module: str, payload: EntryPayload) -> ActionResult:
     service = require_service(module)
-    entry, missing = service.create_entry(payload.values)
-    if missing:
-        return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
-    return ActionResult(ok=True, message=f"{service.ENTITY}已登记", entry=entry)
+    receipt = workbench_boundary.register(service, payload.values)
+    return ActionResult(
+        ok=receipt["ok"], message=receipt["message"], entry=receipt.get("entry"),
+    )
 
 
 @router.post("/{module}/{entry_id}/actions", response_model=ActionResult)
-def run_action(module: str, entry_id: int, payload: ActionPayload) -> ActionResult:
+def run_action(
+    module: str,
+    entry_id: int,
+    payload: ActionPayload,
+    request: Request,
+) -> ActionResult:
     service = require_service(module)
-    entry, message = service.run_action(entry_id, payload.action.strip())
-    return ActionResult(ok=entry is not None, message=message, entry=entry)
+    receipt_key = (
+        request.headers.get("idempotency-key")
+        or request.headers.get("x-request-id")
+        or payload.idempotency_key
+        or payload.request_id
+    )
+    receipt = workbench_boundary.act(
+        service, entry_id, payload.action, receipt_key=receipt_key,
+    )
+    return ActionResult(
+        ok=bool(receipt["ok"]),
+        message=str(receipt["message"]),
+        entry=receipt.get("entry"),
+    )

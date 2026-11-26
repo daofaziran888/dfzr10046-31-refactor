@@ -29,3 +29,5 @@ class EntryPayload(BaseModel):
 class ActionPayload(BaseModel):
     action: str
     remark: str | None = None
+    request_id: str | None = None
+    idempotency_key: str | None = None

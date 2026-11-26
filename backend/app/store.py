@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from app.seed import SEED_ROWS
@@ -14,6 +15,9 @@ class Store:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
+        # 工作台请求可能在线程池中并发；编号分配和追加必须是一个临界区，
+        # 避免两个实际提交对象拿到同一个 id 或互相覆盖。
+        self.lock = threading.RLock()
 
     def module_names(self) -> list[str]:
         return sorted(self._tables)
@@ -21,10 +25,24 @@ class Store:
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])
 
+    def next_id(self, module: str) -> int:
+        with self.lock:
+            rows = self.rows(module)
+            return max((int(row.get("id", 0)) for row in rows), default=0) + 1
+
+    def append_row(self, module: str, row: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            if row.get("id") is None:
+                row["id"] = self.next_id(module)
+            rows = self.rows(module)
+            rows.append(row)
+            return row
+
     def find(self, module: str, entry_id: int) -> dict[str, Any] | None:
-        for row in self.rows(module):
-            if int(row.get("id", 0)) == entry_id:
-                return row
+        with self.lock:
+            for row in self.rows(module):
+                if int(row.get("id", 0)) == entry_id:
+                    return row
         return None
 
     def overview(self) -> dict[str, object]:

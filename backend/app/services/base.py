@@ -50,14 +50,24 @@ class BaseModuleService:
         ]
         if missing:
             return None, missing
-        rows = store.rows(self.MODULE)
-        entry = {"id": max((int(row.get("id", 0)) for row in rows), default=0) + 1}
+        # 先放 id 占位以保持旧响应字段顺序；append_row 会在锁内填入真实编号。
+        entry: dict[str, Any] = {"id": None}
         entry.update({field: values.get(field) for field in self.LIST_FIELDS})
         entry["status"] = self.STATUS_ORDER[0]
         entry["pending"] = True
         entry["abnormal"] = False
-        rows.append(entry)
-        return entry, []
+        return store.append_row(self.MODULE, entry), []
+
+    def run_action_detail(
+        self, entry_id: int, action: str,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        """动作边界的富结果版本。
+
+        旧扩展点仍是 :meth:`run_action`；只覆盖旧方法的服务会自动经此适配，
+        因而既有自定义动作和返回约定不会被新边界绕过。
+        """
+        entry, message = self.run_action(entry_id, action)
+        return entry is not None, message, entry
 
     def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
         entry = store.find(self.MODULE, entry_id)
@@ -66,10 +76,14 @@ class BaseModuleService:
         target = self.ACTION_RULES.get(action)
         if target is None:
             return None, f"动作「{action}」不属于{self.MODULE}可执行范围"
-        entry["status"] = target
-        entry["pending"] = target != self.STATUS_ORDER[-1]
-        entry["abnormal"] = action in self.NEGATIVE_ACTIONS
-        return entry, f"{self.ENTITY}已{action}"
+        with store.lock:
+            current = store.find(self.MODULE, entry_id)
+            if current is None:
+                return None, f"{self.ENTITY} {entry_id} 不存在或已归档"
+            current["status"] = target
+            current["pending"] = target != self.STATUS_ORDER[-1]
+            current["abnormal"] = action in self.NEGATIVE_ACTIONS
+            return current, f"{self.ENTITY}已{action}"
 
     def domain_snapshot(self) -> dict[str, Any]:
         """输出模块级数据质量快照，供跨模块消费和题位源码锚点使用。"""

@@ -29,11 +29,26 @@ export async function runAction(
   key: string,
   id: number,
   action: string,
+  requestId?: string,
 ): Promise<ActionResult> {
+  const headers: Record<string, string> = {}
+  if (requestId) {
+    headers['X-Request-Id'] = requestId
+    headers['Idempotency-Key'] = requestId
+  }
   const response = await request(`/api/${key}/${id}/actions`, {
     method: 'POST',
-    body: JSON.stringify({ action }),
+    headers,
+    body: JSON.stringify({ action, request_id: requestId, idempotency_key: requestId }),
   })
+  return await response.json()
+}
+
+export async function fetchActionReceipt(
+  requestId: string,
+): Promise<ActionResult> {
+  const response = await request(`/api/receipts/${encodeURIComponent(requestId)}`)
+  if (!response.ok) throw new Error('业务回执读取失败')
   return await response.json()
 }
 
